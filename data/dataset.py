@@ -4,6 +4,8 @@ from PIL import Image
 import os
 import torch
 import numpy as np
+import json
+import torchvision.transforms.functional as tf
 
 from .util.mask import (bbox2mask, brush_stroke_mask, get_irregular_mask, random_bbox, random_cropping_bbox)
 
@@ -31,6 +33,61 @@ def make_dataset(dir):
 
 def pil_loader(path):
     return Image.open(path).convert('RGB')
+
+class iHamony4Dataset(data.Dataset):
+    def __init__(self, data_root, mask_config={}, data_len=-1, image_size=[256, 256], loader=pil_loader):
+        imgs = []
+        captions = []
+        data_dir = os.path.abspath(os.path.join(data_root, '..'))
+        for line in open(data_root, 'r'):
+            cont = json.loads(line.strip())
+            imgs.append(os.path.join(data_dir, cont['file_name']))
+            captions.append(cont['text'])
+
+        if data_len > 0:
+            self.imgs = imgs[:int(data_len)]
+            self.captions = captions[:int(data_len)]
+        else:
+            self.imgs = imgs
+            self.captions = captions
+        self.tfs = transforms.Compose([
+                transforms.Resize((image_size[0], image_size[1])),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5,0.5, 0.5])
+        ])
+        self.image_size = image_size
+
+    def __getitem__(self, index):
+        ret = {}
+        path = self.imgs[index]
+        name_parts=path.split('_')
+        mask_path = self.image_paths[index].replace('composite_images','masks')
+        mask_path = mask_path.replace(('_'+name_parts[-1]),'.png')
+        target_path = self.image_paths[index].replace('composite_images','real_images')
+        target_path = target_path.replace(('_'+name_parts[-2]+'_'+name_parts[-1]),'.jpg')
+
+        comp = Image.open(path).convert('RGB')
+        real = Image.open(target_path).convert('RGB')
+        mask = Image.open(mask_path).convert('1')
+
+        if comp.size[0] != self.image_size:
+            # assert 0
+            comp = tf.resize(comp, [self.image_size, self.image_size])
+            mask = tf.resize(mask, [self.image_size, self.image_size])
+            real = tf.resize(real, [self.image_size,self.image_size])
+
+        mask = tf.to_tensor(mask)
+        mask = torch.ge(mask, 0.5).float()
+        
+        ret['gt_image'] = self.tfs(real)
+        ret['cond_image'] = self.tfs(comp)
+        ret['mask'] = mask
+        ret['path'] = path.rsplit("/")[-1].rsplit("\\")[-1]
+        return ret
+
+    def __len__(self):
+        return len(self.imgs)
+
 
 class InpaintDataset(data.Dataset):
     def __init__(self, data_root, mask_config={}, data_len=-1, image_size=[256, 256], loader=pil_loader):
